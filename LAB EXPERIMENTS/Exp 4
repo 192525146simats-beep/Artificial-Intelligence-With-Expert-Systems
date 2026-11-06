@@ -1,0 +1,14 @@
+import heapq
+g={'A':['B','C'],'B':['D'],'C':['D'],'D':[]}
+h={'A':5,'B':3,'C':1,'D':0}
+q=[(5,'A',['A'])]
+seen=set()
+while q:
+ _,n,p=heapq.heappop(q)
+ if n in seen: continue
+ seen.add(n)
+ if n=='D':
+  print('Path:',p)
+  break
+ for x in g[n]:
+  heapq.heappush(q,(h[x],x,p+[x]))
