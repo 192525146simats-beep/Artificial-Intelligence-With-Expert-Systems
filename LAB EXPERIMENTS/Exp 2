@@ -1,0 +1,8 @@
+g={'A':['B','C'],'B':['D','E'],'C':['F'],'D':[],'E':[],'F':[]}
+seen=[]
+def dfs(n):
+ if n not in seen:
+  seen.append(n)
+  for x in g[n]: dfs(x)
+dfs('A')
+print('DFS traversal:',seen)
