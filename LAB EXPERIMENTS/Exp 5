@@ -1,0 +1,14 @@
+import heapq
+g={'Start':['Rack1','Rack2'],'Rack1':['Goal'],'Rack2':['Goal'],'Goal':[]}
+h={'Start':4,'Rack1':2,'Rack2':1,'Goal':0}
+q=[(4,'Start',['Start'])]
+seen=set()
+while q:
+ _,n,p=heapq.heappop(q)
+ if n in seen: continue
+ seen.add(n)
+ if n=='Goal':
+  print('Route:',p)
+  break
+ for x in g[n]:
+  heapq.heappush(q,(h[x],x,p+[x]))
