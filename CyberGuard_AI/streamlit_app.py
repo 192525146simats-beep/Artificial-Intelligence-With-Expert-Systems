@@ -1,530 +1,870 @@
 
-import streamlit as st
-import pandas as pd
-import plotly.express as px
+import os
+import tempfile
+from pathlib import Path
 
-from cyberguard.analysis import analyse_events
-from cyberguard.threat_intelligence import THREAT_DATABASE
-from cyberguard.voice_assistant import listen, speak, get_response
+import pandas as pd
+import streamlit as st
+
+# Optional visual floating panel
+try:
+    from streamlit_float import float_init
+    FLOAT_AVAILABLE = True
+except ImportError:
+    FLOAT_AVAILABLE = False
+
+# Voice recording
+try:
+    from streamlit_mic_recorder import mic_recorder
+    MIC_AVAILABLE = True
+except ImportError:
+    MIC_AVAILABLE = False
+
+# Groq AI
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+
+
+# ---------------------------------------------------------
+# APPLICATION CONFIGURATION
+# ---------------------------------------------------------
 
 st.set_page_config(
     page_title="CyberGuard AI",
     page_icon="🛡️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+BASE_DIR = Path(__file__).resolve().parent
+ASSET_DIR = BASE_DIR / "assets"
+LOGO_PATH = ASSET_DIR / "logo.png"
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap');
-
 .stApp {
-    background:
-    radial-gradient(circle at top right,#123c60,#071426 55%);
-    color:#eaf4ff;
-    font-family:Manrope,sans-serif;
+    background: linear-gradient(135deg, #061426, #0a1d33);
+    color: #edf7ff;
 }
-
-section[data-testid="stSidebar"] {
-    background:#0b1e35;
-    border-right:1px solid #174a70;
+[data-testid="stSidebar"] {
+    background: #09182a;
+    border-right: 1px solid #193b58;
 }
-
-.block-container {
-    padding-top:2rem;
-    max-width:1500px;
+h1, h2, h3 {
+    color: #e9f7ff;
 }
-
-.hero {
-    background:linear-gradient(110deg,#102d4d,#123e5b);
-    border:1px solid #23759b;
-    border-radius:20px;
-    padding:28px;
-    animation:appear .8s ease;
+p, label {
+    color: #c0d5e7;
 }
-
-.hero h1 {
-    font-size:38px;
-    color:#ffffff;
-}
-
-.hero p {
-    color:#a9d5ef;
-}
-
-@keyframes appear {
-    from {opacity:0;transform:translateY(15px);}
-    to {opacity:1;transform:translateY(0);}
-}
-
 .metric-card {
-    background:linear-gradient(145deg,#142d49,#0c2038);
-    border:1px solid #285274;
-    border-top:3px solid #00d9ff;
-    border-radius:15px;
-    padding:20px;
-    min-height:125px;
-    transition:transform .25s;
+    background: #102942;
+    border: 1px solid #205273;
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 12px;
 }
-
-.metric-card:hover {
-    transform:translateY(-5px);
-}
-
-.metric-title {
-    color:#8eb4d3;
-    font-size:12px;
-    letter-spacing:2px;
-}
-
 .metric-number {
-    font-size:32px;
-    font-weight:800;
-    color:white;
+    color: #28d8ff;
+    font-size: 30px;
+    font-weight: 700;
 }
-
-.metric-sub {
-    color:#8eb4d3;
-    font-size:12px;
+.small-muted {
+    color: #9db8ce;
+    font-size: 13px;
 }
-
-.panel {
-    background:#10243b;
-    border:1px solid #264a68;
-    border-radius:16px;
-    padding:20px;
+.hero {
+    padding: 22px;
+    border-radius: 14px;
+    background: linear-gradient(110deg, #103653, #09233b);
+    border: 1px solid #1d5877;
+    margin-bottom: 20px;
 }
-
-h1,h2,h3 {
-    color:#f1f7ff;
-}
-
-.stButton>button {
-    background:linear-gradient(90deg,#007dba,#00b9d2);
-    color:white;
-    border:0;
-    border-radius:10px;
-    font-weight:bold;
-}
-
-.stButton>button:hover {
-    background:#00a9d0;
-    color:white;
+div[data-testid="stMetric"] {
+    background: #102942;
+    border: 1px solid #205273;
+    padding: 15px;
+    border-radius: 12px;
 }
 </style>
 """, unsafe_allow_html=True)
 
 
-def hero(title, description):
-    st.markdown(f"""
-    <div class="hero">
-      <div style="color:#39d9ed;letter-spacing:3px">
-        CYBERGUARD AI / SECURITY OPERATIONS
-      </div>
-      <h1>{title}</h1>
-      <p>{description}</p>
-      <div style="color:#48d8e9">
-        DETECT &nbsp; • &nbsp; ANALYSE &nbsp; • &nbsp; PREVENT
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+# ---------------------------------------------------------
+# GROQ SECRET CONFIGURATION
+# ---------------------------------------------------------
 
-
-def metric(title, number, subtitle):
-    st.markdown(f"""
-    <div class="metric-card">
-      <div class="metric-title">{title}</div>
-      <div class="metric-number">{number}</div>
-      <div class="metric-sub">{subtitle}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-def sample_data():
+def get_groq_key():
     try:
-        return pd.read_csv(
-            "data/sample_security_events.csv"
-        )
-    except FileNotFoundError:
-        return pd.DataFrame([
-            ["E001","192.0.2.10","198.51.100.5","TCP",443,18000,1,35],
-            ["E002","203.0.113.8","198.51.100.5","TCP",22,1200,14,18],
-            ["E003","192.0.2.45","198.51.100.9","UDP",53,800,0,920],
-            ["E004","203.0.113.22","198.51.100.2","TCP",3389,900,11,12],
-            ["E005","192.0.2.88","198.51.100.3","TCP",443,88000000,0,28]
-        ], columns=[
-            "event_id","src_ip","dst_ip","protocol",
-            "dst_port","bytes","failed_logins",
-            "requests_per_minute"
-        ])
+        if "GROQ_API_KEY" in st.secrets:
+            return st.secrets["GROQ_API_KEY"]
+
+        if "groq" in st.secrets:
+            return st.secrets["groq"]["api_key"]
+    except Exception:
+        pass
+
+    return os.getenv("GROQ_API_KEY")
 
 
-if "data" not in st.session_state:
-    st.session_state.data = sample_data()
+def get_groq_client():
+    key = get_groq_key()
 
-with st.sidebar:
+    if not key:
+        return None
+
+    if not GROQ_AVAILABLE:
+        return None
+
+    return Groq(api_key=key)
+
+
+# ---------------------------------------------------------
+# SAMPLE DATA
+# Replace this with your real security-event dataset later.
+# ---------------------------------------------------------
+
+def get_events():
+    return pd.DataFrame([
+        {
+            "IP Address": "192.168.1.10",
+            "Threat": "Brute Force",
+            "Severity": "High",
+            "Status": "Detected",
+            "Failed Logins": 35,
+            "Requests": 120
+        },
+        {
+            "IP Address": "192.168.1.15",
+            "Threat": "DDoS",
+            "Severity": "Critical",
+            "Status": "Under Review",
+            "Failed Logins": 2,
+            "Requests": 950
+        },
+        {
+            "IP Address": "192.168.1.22",
+            "Threat": "Port Scanning",
+            "Severity": "Medium",
+            "Status": "Detected",
+            "Failed Logins": 5,
+            "Requests": 250
+        },
+        {
+            "IP Address": "192.168.1.30",
+            "Threat": "Suspicious Login",
+            "Severity": "High",
+            "Status": "Investigating",
+            "Failed Logins": 18,
+            "Requests": 90
+        },
+        {
+            "IP Address": "192.168.1.45",
+            "Threat": "Normal Traffic",
+            "Severity": "Low",
+            "Status": "Safe",
+            "Failed Logins": 0,
+            "Requests": 20
+        }
+    ])
+
+
+# ---------------------------------------------------------
+# SHARED SESSION STATE
+# ---------------------------------------------------------
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "last_voice_reply" not in st.session_state:
+    st.session_state.last_voice_reply = ""
+
+
+# ---------------------------------------------------------
+# DASHBOARD
+# ---------------------------------------------------------
+
+def dashboard():
 
     st.markdown("""
-    <h1 style="color:#35d9ed">🛡️ CyberGuard AI</h1>
-    <p style="font-size:11px;color:#91b9d7">
-    INTELLIGENT CYBER THREAT ANALYSIS
-    </p>
+    <div class="hero">
+        <h1>🛡️ CyberGuard AI</h1>
+        <h3>Intelligent Cyber Threat Analysis Expert System</h3>
+        <p>AI-powered cybersecurity monitoring and threat awareness.</p>
+    </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("---")
+    df = get_events()
 
-    page = st.radio(
-        "NAVIGATION",
-        [
-            "Dashboard",
-            "Threat Analysis",
-            "Threat Intelligence",
-            "Expert System",
-            "AI Prediction",
-            "System Workflow",
-            "Security Reports",
-            "Voice Assistant"
-        ]
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("Security Events", len(df))
+    c2.metric("Critical Threats", len(df[df["Severity"] == "Critical"]))
+    c3.metric("High Risk", len(df[df["Severity"] == "High"]))
+    c4.metric("Safe Events", len(df[df["Severity"] == "Low"]))
+
+    st.subheader("Security Event Overview")
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.subheader("Threat Distribution")
+
+    counts = df["Threat"].value_counts()
+    st.bar_chart(counts)
+
+    st.info(
+        "The displayed records are sample demonstration data. "
+        "Connect your actual security dataset for real analysis."
     )
 
-    st.markdown("---")
-    st.success("Analysis engine ready")
-    st.caption("Academic Capstone Prototype")
 
-results = analyse_events(st.session_state.data)
-
-critical = int((results.severity == "Critical").sum())
-high = int((results.severity == "High").sum())
-medium = int((results.severity == "Medium").sum())
-low = int((results.severity == "Low").sum())
-
-
-# DASHBOARD
-
-if page == "Dashboard":
-
-    hero(
-        "Cyber Threat Command Center",
-        "Intelligent monitoring, AI threat prediction and expert-system analysis."
-    )
-
-    st.write("")
-
-    c1,c2,c3,c4 = st.columns(4)
-
-    with c1:
-        metric("THREATS DETECTED",len(results),"Events analysed")
-
-    with c2:
-        metric("CRITICAL THREATS",critical,"Immediate review")
-
-    with c3:
-        metric("HIGH RISK",high,"Priority investigation")
-
-    with c4:
-        metric("LOW RISK",low,"Routine monitoring")
-
-    st.write("")
-
-    left,right = st.columns([1.1,1])
-
-    with left:
-        st.markdown(
-            '<div class="panel"><h3>Threat Severity Overview</h3>',
-            unsafe_allow_html=True
-        )
-
-        chart = results["severity"].value_counts().reset_index()
-        chart.columns = ["Severity","Count"]
-
-        fig = px.pie(
-            chart,
-            names="Severity",
-            values="Count",
-            hole=0.65,
-            color="Severity",
-            color_discrete_map={
-                "Critical":"#ff4d6d",
-                "High":"#ff9b54",
-                "Medium":"#f4d35e",
-                "Low":"#26c6a0"
-            }
-        )
-
-        fig.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)",
-            font_color="white"
-        )
-
-        st.plotly_chart(fig,use_container_width=True)
-        st.markdown("</div>",unsafe_allow_html=True)
-
-    with right:
-        st.markdown(
-            '<div class="panel"><h3>Threat Categories</h3>',
-            unsafe_allow_html=True
-        )
-
-        chart2 = results["threat_type"].value_counts().reset_index()
-        chart2.columns = ["Threat","Count"]
-
-        fig2 = px.bar(
-            chart2,
-            x="Threat",
-            y="Count",
-            color="Count",
-            color_continuous_scale="teal"
-        )
-
-        fig2.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font_color="white"
-        )
-
-        st.plotly_chart(fig2,use_container_width=True)
-        st.markdown("</div>",unsafe_allow_html=True)
-
-    st.subheader("Recent Security Events")
-
-    st.dataframe(results,use_container_width=True,hide_index=True)
-
-
+# ---------------------------------------------------------
 # THREAT ANALYSIS
+# ---------------------------------------------------------
 
-elif page == "Threat Analysis":
+def threat_analysis():
 
-    hero(
-        "Threat Analysis",
-        "Upload security events and analyse suspicious activity."
+    st.title("🔍 Threat Analysis")
+    st.write("Review suspicious cybersecurity events.")
+
+    df = get_events()
+
+    severity = st.selectbox(
+        "Filter by severity",
+        ["All", "Critical", "High", "Medium", "Low"]
     )
 
-    uploaded = st.file_uploader(
-        "Upload security CSV",
-        type=["csv"]
-    )
+    if severity != "All":
+        df = df[df["Severity"] == severity]
 
-    if uploaded:
-        try:
-            st.session_state.data = pd.read_csv(uploaded)
-            results = analyse_events(st.session_state.data)
-            st.success("File analysed successfully.")
-        except Exception as error:
-            st.error(f"Unable to analyse file: {error}")
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
-    st.dataframe(
-        analyse_events(st.session_state.data),
-        use_container_width=True,
-        hide_index=True
-    )
+    st.subheader("Analyse an event")
+
+    ip = st.text_input("IP Address", "192.168.1.100")
+    failed = st.number_input("Failed login attempts", 0, 10000, 10)
+    requests = st.number_input("Number of requests", 0, 100000, 200)
+
+    if st.button("Analyse Event", type="primary"):
+
+        if failed > 30 or requests > 800:
+            st.error("High-risk activity detected.")
+            st.write("Recommendation: Investigate the source and review access logs.")
+
+        elif failed > 10 or requests > 300:
+            st.warning("Suspicious activity detected.")
+            st.write("Recommendation: Monitor the IP address and verify user activity.")
+
+        else:
+            st.success("No strong threat indicator found in this demonstration.")
+
+        st.caption("This is a demonstration rule, not a validated security verdict.")
 
 
+# ---------------------------------------------------------
 # THREAT INTELLIGENCE
+# ---------------------------------------------------------
 
-elif page == "Threat Intelligence":
+def threat_intelligence():
 
-    hero(
-        "Threat Intelligence Center",
-        "Explore common cyber threats, their indicators and prevention."
-    )
-
-    for name, info in THREAT_DATABASE.items():
-
-        with st.expander(name):
-
-            st.write("**Description**")
-            st.write(info["description"])
-
-            st.write("**Indicators**")
-            st.write(info["indicators"])
-
-            st.write("**Prevention**")
-            st.write(info["prevention"])
-
-
-# EXPERT SYSTEM
-
-elif page == "Expert System":
-
-    hero(
-        "Expert System",
-        "Explainable knowledge-based threat identification."
-    )
+    st.title("🌐 Threat Intelligence")
 
     st.write(
-        "The expert system uses predefined IF–THEN rules "
-        "to evaluate suspicious security events."
+        "Understand common cyberattack patterns and their indicators."
     )
 
-    st.dataframe(
-        results[[
-            "event_id",
-            "threat_type",
-            "severity",
-            "rule_matches",
-            "recommendation"
-        ]],
-        use_container_width=True,
-        hide_index=True
+    threats = {
+        "DDoS Attack": (
+            "An attacker floods a service with traffic to make it unavailable.",
+            "Unusual traffic spikes, repeated requests and service degradation.",
+            "Use traffic filtering, rate limits and DDoS protection."
+        ),
+        "Brute Force": (
+            "Repeated password attempts are used to gain unauthorized access.",
+            "Many failed logins from the same source.",
+            "Apply MFA, account lockouts and login monitoring."
+        ),
+        "Port Scanning": (
+            "An attacker checks open network ports to identify services.",
+            "Repeated connection attempts across multiple ports.",
+            "Restrict exposed ports and monitor firewall logs."
+        ),
+        "Phishing": (
+            "Fraudulent messages attempt to steal credentials or sensitive data.",
+            "Suspicious links, unexpected attachments and fake login pages.",
+            "Use email filtering and user awareness training."
+        ),
+        "Malware": (
+            "Malicious software attempts to damage, monitor or control systems.",
+            "Unexpected processes, suspicious files and unusual network traffic.",
+            "Use endpoint protection and isolate affected systems."
+        )
+    }
+
+    for name, details in threats.items():
+        with st.expander(name):
+            st.write("**Description:**", details[0])
+            st.write("**Indicators:**", details[1])
+            st.write("**Recommended action:**", details[2])
+
+
+# ---------------------------------------------------------
+# EXPERT SYSTEM
+# ---------------------------------------------------------
+
+def expert_system():
+
+    st.title("🧩 Cybersecurity Expert System")
+
+    st.write("Evaluate activity using a demonstration rule base.")
+
+    failed = st.number_input(
+        "Failed login attempts",
+        min_value=0,
+        max_value=10000,
+        value=5,
+        key="expert_failed"
     )
 
+    traffic = st.number_input(
+        "Requests per minute",
+        min_value=0,
+        max_value=100000,
+        value=100,
+        key="expert_traffic"
+    )
 
+    unknown_port = st.checkbox("Unknown or suspicious port detected")
+    unusual_time = st.checkbox("Login at an unusual time")
+
+    if st.button("Run Expert Rules", type="primary"):
+
+        findings = []
+
+        if failed >= 20:
+            findings.append(
+                "Rule 1: Repeated failed logins indicate possible brute-force activity."
+            )
+
+        if traffic >= 800:
+            findings.append(
+                "Rule 2: High traffic volume may indicate a DDoS pattern."
+            )
+
+        if unknown_port:
+            findings.append(
+                "Rule 3: Unknown port usage requires investigation."
+            )
+
+        if unusual_time:
+            findings.append(
+                "Rule 4: Unusual login time requires identity verification."
+            )
+
+        if findings:
+            st.warning("Expert system alerts")
+            for item in findings:
+                st.write("•", item)
+        else:
+            st.success("No demonstration rules were triggered.")
+
+        st.caption(
+            "These are educational rules. Validate findings using real logs."
+        )
+
+
+# ---------------------------------------------------------
 # AI PREDICTION
+# ---------------------------------------------------------
 
-elif page == "AI Prediction":
+def ai_prediction():
 
-    hero(
-        "AI Threat Prediction",
-        "Machine-learning-based classification of suspicious events."
+    st.title("🤖 AI Threat Prediction")
+
+    st.write(
+        "Enter event details to estimate a demonstration risk score."
     )
 
-    st.warning(
-        "The model uses synthetic training data for academic "
-        "demonstration. Predictions are not production security verdicts."
+    failed = st.slider(
+        "Failed login attempts",
+        0, 100, 5
     )
 
-    st.dataframe(
-        results[[
-            "event_id",
-            "threat_type",
-            "confidence",
-            "risk_score"
-        ]],
-        use_container_width=True,
-        hide_index=True
+    traffic = st.slider(
+        "Network requests",
+        0, 2000, 100
     )
 
-    st.metric(
-        "Average model confidence",
-        f"{results.confidence.mean():.2f}%"
+    port = st.selectbox(
+        "Port category",
+        ["Normal", "Unusual", "Unknown"]
     )
 
+    if st.button("Predict Threat", type="primary"):
 
-# WORKFLOW
+        # Transparent demonstration score.
+        # Replace with your trained model once its feature schema is confirmed.
+        score = min(
+            100,
+            failed * 1.5
+            + traffic * 0.035
+            + (25 if port == "Unusual" else 40 if port == "Unknown" else 0)
+        )
 
-elif page == "System Workflow":
+        st.metric("Estimated Risk Score", f"{score:.1f}%")
+        st.progress(int(score))
 
-    hero(
-        "System Workflow",
-        "How CyberGuard AI processes and analyses security events."
-    )
+        if score >= 70:
+            st.error("High demonstration risk")
+            st.write("Recommendation: Investigate the event immediately.")
 
-    stages = [
-        ("01","DATA COLLECTION","Upload network security logs"),
-        ("02","PREPROCESSING","Clean and prepare event features"),
-        ("03","AI ANALYSIS","Random Forest threat classification"),
-        ("04","EXPERT SYSTEM","Evaluate IF–THEN knowledge rules"),
-        ("05","RISK ASSESSMENT","Calculate severity and risk score"),
-        ("06","RESULTS","Generate alerts and reports")
+        elif score >= 40:
+            st.warning("Moderate demonstration risk")
+            st.write("Recommendation: Monitor the activity.")
+
+        else:
+            st.success("Low demonstration risk")
+            st.write("Recommendation: Continue normal monitoring.")
+
+        st.caption(
+            "Important: This is a rule-based demonstration score, "
+            "not a prediction from your trained threat_model.pkl."
+        )
+
+
+# ---------------------------------------------------------
+# SYSTEM WORKFLOW
+# ---------------------------------------------------------
+
+def workflow():
+
+    st.title("🔄 System Workflow")
+
+    steps = [
+        "1. Security Event Input",
+        "2. Data Cleaning and Preprocessing",
+        "3. Feature Extraction",
+        "4. Machine Learning Threat Prediction",
+        "5. Expert Rule Evaluation",
+        "6. Threat Classification",
+        "7. Security Recommendations",
+        "8. Dashboard and Reports"
     ]
 
-    for number,title,description in stages:
-
-        st.markdown(f"""
-        <div class="panel" style="margin:12px 0">
-            <h3 style="color:#35d9ed">{number} — {title}</h3>
-            <p>{description}</p>
-        </div>
-        """,unsafe_allow_html=True)
-
-        if number != "06":
-            st.markdown(
-                "<div style='text-align:center;color:#35d9ed'>↓</div>",
-                unsafe_allow_html=True
-            )
+    for step in steps:
+        st.info(step)
 
     st.subheader("System Architecture")
 
-    st.code("""
-Security Event Input
-        |
-        v
-Data Preprocessing
-        |
-   +----+----+
-   |         |
-   v         v
-AI Model   Expert Rules
-   |         |
-   +----+----+
-        |
-        v
-Risk Assessment
-        |
-        v
-Dashboard / Alerts / Reports
-    """,language="text")
+    st.graphviz_chart("""
+    digraph CyberGuard {
+        rankdir=TB;
+        node [shape=box, style=rounded, color="#16BCEB"];
+
+        A [label="Security Event Input"];
+        B [label="Data Preprocessing"];
+        C [label="Feature Extraction"];
+        D [label="Machine Learning"];
+        E [label="Expert Rule Engine"];
+        F [label="Threat Classification"];
+        G [label="Recommendations"];
+        H [label="Dashboard and Reports"];
+
+        A -> B -> C;
+        C -> D;
+        C -> E;
+        D -> F;
+        E -> F;
+        F -> G -> H;
+    }
+    """)
 
 
+# ---------------------------------------------------------
 # REPORTS
+# ---------------------------------------------------------
 
-elif page == "Security Reports":
+def reports():
 
-    hero(
-        "Security Reports",
-        "Review and export threat analysis results."
-    )
+    st.title("📈 Security Reports")
 
-    st.dataframe(
-        results,
-        use_container_width=True,
-        hide_index=True
-    )
+    df = get_events()
 
-    csv = results.to_csv(index=False).encode("utf-8")
+    st.subheader("Event Report")
+
+    st.dataframe(df, use_container_width=True)
+
+    st.subheader("Severity Summary")
+
+    summary = df.groupby("Severity").size().reset_index(name="Events")
+
+    st.dataframe(summary, use_container_width=True)
+
+    csv = df.to_csv(index=False).encode("utf-8")
 
     st.download_button(
-        "Download CSV Report",
+        "Download Security Report CSV",
         data=csv,
-        file_name="CyberGuard_Report.csv",
+        file_name="cyberguard_security_report.csv",
         mime="text/csv"
     )
 
 
-# VOICE ASSISTANT
+# ---------------------------------------------------------
+# VOICE ASSISTANT PAGE
+# ---------------------------------------------------------
 
-elif page == "Voice Assistant":
+def voice_assistant_page():
 
-    hero(
-        "CyberGuard Voice Assistant",
-        "Interact with your cybersecurity expert system using voice."
+    st.title("🎙️ CyberGuard Voice Assistant")
+
+    st.write(
+        "Ask cybersecurity questions using your microphone "
+        "or type your question."
     )
 
-    st.markdown(
-        '<div class="panel"><h2>🎙️ Voice Control</h2>'
-        '<p>Ask about threats, reports and system workflow.</p></div>',
-        unsafe_allow_html=True
+    st.info(
+        "Press Start recording, speak, and press Stop recording. "
+        "The assistant will transcribe and answer your question."
     )
 
-    spoken = listen()
+    if not MIC_AVAILABLE:
+        st.error("Microphone package is not installed.")
+        return
 
-    if spoken:
+    if not get_groq_key():
+        st.error("Please configure your Groq API key in Streamlit Secrets.")
+        return
 
-        st.success(f"You said: {spoken}")
+    audio = mic_recorder(
+        start_prompt="🎙️ Start recording",
+        stop_prompt="⏹️ Stop recording",
+        just_once=True,
+        use_container_width=True,
+        key="main_voice_recorder"
+    )
 
-        answer = get_response(spoken,results)
+    if audio and audio.get("bytes"):
 
-        st.info(answer)
+        client = get_groq_client()
 
-        audio = speak(answer)
+        if client is None:
+            st.error("Groq client is unavailable.")
+            return
 
-        if audio:
-            st.audio(audio,format="audio/mp3")
+        try:
+            with st.spinner("Transcribing your voice..."):
 
-    st.markdown("### Try these commands")
+                transcription = client.audio.transcriptions.create(
+                    file=(
+                        "cyberguard_voice.wav",
+                        audio["bytes"],
+                        "audio/wav"
+                    ),
+                    model="whisper-large-v3-turbo"
+                )
 
-    st.markdown("""
-    - Give me the security summary.
-    - Explain phishing.
-    - What is ransomware?
-    - Explain the system workflow.
-    - Generate a threat report.
-    """)
+                question = transcription.text.strip()
+
+            st.write("**You said:**", question)
+
+            if question:
+                answer = ask_groq(question)
+
+                if answer:
+                    st.session_state.messages.append(
+                        {"role": "user", "content": question}
+                    )
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": answer}
+                    )
+
+                    st.markdown("### CyberGuard AI Response")
+                    st.write(answer)
+
+                    play_female_voice(answer)
+
+        except Exception as e:
+            st.error(f"Voice processing failed: {e}")
+
+    st.divider()
+
+    typed_question = st.text_input(
+        "Or type your question",
+        key="voice_text_question"
+    )
+
+    if st.button("Ask CyberGuard AI") and typed_question.strip():
+
+        answer = ask_groq(typed_question.strip())
+
+        if answer:
+            st.write(answer)
+            play_female_voice(answer)
 
 
-st.markdown("""
-<div style="text-align:center;color:#6688a8;padding:30px">
-CYBERGUARD AI | INTELLIGENT CYBER THREAT ANALYSIS EXPERT SYSTEM
-<br>
-Artificial Intelligence and Expert Systems Capstone Project
-</div>
-""",unsafe_allow_html=True)
+# ---------------------------------------------------------
+# GROQ CHAT RESPONSE
+# ---------------------------------------------------------
+
+def ask_groq(question):
+
+    client = get_groq_client()
+
+    if client is None:
+        st.error(
+            "Groq API key is missing or the Groq package is unavailable."
+        )
+        return None
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are CyberGuard AI, a helpful cybersecurity "
+                        "assistant. Explain threats, security events, "
+                        "network risks, defensive controls and safe "
+                        "incident response in clear, simple language. "
+                        "Never claim that sample data proves a real attack. "
+                        "Do not provide instructions for unauthorized access."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": question
+                }
+            ],
+            temperature=0.4,
+            max_tokens=600
+        )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
+        st.error(f"Groq chat error: {e}")
+        return None
+
+
+# ---------------------------------------------------------
+# FEMALE TEXT-TO-SPEECH
+# ---------------------------------------------------------
+
+def play_female_voice(text):
+
+    client = get_groq_client()
+
+    if client is None:
+        return
+
+    try:
+        # Orpheus English TTS has a 200-character input limit.
+        spoken_text = text[:200]
+
+        with st.spinner("Generating female voice..."):
+
+            response = client.audio.speech.create(
+                model="canopylabs/orpheus-v1-english",
+                voice="hannah",
+                input=spoken_text,
+                response_format="wav"
+            )
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".wav",
+                delete=False
+            ) as temp_file:
+
+                temp_path = temp_file.name
+
+            response.write_to_file(temp_path)
+
+            with open(temp_path, "rb") as file:
+                audio_bytes = file.read()
+
+            os.remove(temp_path)
+
+        st.audio(audio_bytes, format="audio/wav")
+
+        if len(text) > 200:
+            st.caption(
+                "Only the first 200 characters were spoken. "
+                "The complete answer is displayed above."
+            )
+
+    except Exception as e:
+        st.warning(
+            "Female voice generation is unavailable. "
+            "Check Groq TTS model access and usage limits. "
+            f"Details: {e}"
+        )
+
+
+# ---------------------------------------------------------
+# NAVIGATION
+# ---------------------------------------------------------
+
+pages = {
+    "MAIN": [
+        st.Page(
+            dashboard,
+            title="Dashboard",
+            icon="🏠",
+            default=True
+        ),
+    ],
+    "THREAT MANAGEMENT": [
+        st.Page(
+            threat_analysis,
+            title="Threat Analysis",
+            icon="🔍"
+        ),
+        st.Page(
+            threat_intelligence,
+            title="Threat Intelligence",
+            icon="🌐"
+        ),
+        st.Page(
+            expert_system,
+            title="Expert System",
+            icon="🧩"
+        ),
+        st.Page(
+            ai_prediction,
+            title="AI Prediction",
+            icon="🤖"
+        ),
+    ],
+    "SYSTEM": [
+        st.Page(
+            workflow,
+            title="System Workflow",
+            icon="🔄"
+        ),
+        st.Page(
+            reports,
+            title="Security Reports",
+            icon="📊"
+        ),
+        st.Page(
+            voice_assistant_page,
+            title="Voice Assistant",
+            icon="🎙️"
+        ),
+    ]
+}
+
+if FLOAT_AVAILABLE:
+    try:
+        float_init()
+    except Exception:
+        pass
+
+current_page = st.navigation(pages, position="sidebar")
+
+# Run selected page
+current_page.run()
+
+
+# ---------------------------------------------------------
+# FLOATING VOICE ASSISTANT - SHARED ON EVERY PAGE
+# ---------------------------------------------------------
+
+assistant_box = st.container()
+
+if FLOAT_AVAILABLE:
+    try:
+        assistant_box.float(
+            "bottom: 1rem; right: 1rem; "
+            "width: 340px; z-index: 999;"
+        )
+    except Exception:
+        pass
+
+with assistant_box:
+
+    with st.expander("🎙️ CyberGuard AI Assistant", expanded=False):
+
+        st.caption("Your cybersecurity voice assistant")
+
+        if not get_groq_key():
+            st.warning("Configure your Groq API key to activate AI.")
+        else:
+
+            if MIC_AVAILABLE:
+
+                floating_audio = mic_recorder(
+                    start_prompt="🎙️ Speak",
+                    stop_prompt="⏹️ Stop",
+                    just_once=True,
+                    use_container_width=True,
+                    key="floating_voice_recorder"
+                )
+
+                if floating_audio and floating_audio.get("bytes"):
+
+                    try:
+                        client = get_groq_client()
+
+                        with st.spinner("Listening and understanding..."):
+
+                            transcription = client.audio.transcriptions.create(
+                                file=(
+                                    "question.wav",
+                                    floating_audio["bytes"],
+                                    "audio/wav"
+                                ),
+                                model="whisper-large-v3-turbo"
+                            )
+
+                            question = transcription.text.strip()
+
+                        st.write("You:", question)
+
+                        if question:
+                            answer = ask_groq(question)
+
+                            if answer:
+                                st.write("CyberGuard:", answer)
+                                play_female_voice(answer)
+
+                    except Exception as e:
+                        st.error(f"Voice error: {e}")
+
+            floating_text = st.text_input(
+                "Ask CyberGuard AI",
+                key="floating_chat_input"
+            )
+
+            if st.button(
+                "Send",
+                key="floating_send_button",
+                use_container_width=True
+            ) and floating_text.strip():
+
+                answer = ask_groq(floating_text.strip())
+
+                if answer:
+                    st.write(answer)
+                    play_female_voice(answer)
+
+            st.caption(
+                "Microphone access begins only after you press Speak."
+            )
+
+
+# ---------------------------------------------------------
+# SIDEBAR FOOTER
+# ---------------------------------------------------------
+
+with st.sidebar:
+
+    st.divider()
+
+    st.caption("CYBERGUARD AI")
+    st.caption("Intelligent Cyber Threat Analysis")
+    st.caption("Academic AI & Expert Systems Project")
