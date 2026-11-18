@@ -1,0 +1,13 @@
+facts={'computer_on','power_light_on','screen_blank'}
+rules=[({'power_light_on','screen_blank'},'possible_display_fault'),
+ ({'computer_on','possible_display_fault'},'check_monitor_cable')]
+changed=True
+while changed:
+ changed=False
+ for cond,result in rules:
+  if cond<=facts and result not in facts:
+   facts.add(result)
+   changed=True
+print('Derived facts:')
+for x in sorted(facts):
+ print('-',x)
