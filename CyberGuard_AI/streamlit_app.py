@@ -1103,6 +1103,448 @@ def voice_assistant_page():
         st.rerun()
 
 
+
+
+# ==========================================================
+# NEW FEATURE 1: LIVE CVE & VULNERABILITY FEED
+# ==========================================================
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_recent_cves(limit=20):
+    """Fetch recent CVE entries from the public NVD API."""
+    import requests
+    url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    params = {"resultsPerPage": limit, "startIndex": 0}
+    response = requests.get(url, params=params, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
+    rows = []
+
+    for item in payload.get("vulnerabilities", []):
+        cve = item.get("cve", {})
+        descriptions = cve.get("descriptions", [])
+        description = next(
+            (d.get("value", "") for d in descriptions if d.get("lang") == "en"),
+            descriptions[0].get("value", "") if descriptions else ""
+        )
+        metrics = cve.get("metrics", {})
+        cvss = None
+        severity = "Unknown"
+        for metric_name in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            metric_list = metrics.get(metric_name, [])
+            if metric_list:
+                cvss_data = metric_list[0].get("cvssData", {})
+                cvss = cvss_data.get("baseScore")
+                severity = (
+                    metric_list[0].get("baseSeverity")
+                    or cvss_data.get("baseSeverity")
+                    or "Unknown"
+                )
+                break
+        published = cve.get("published", "")
+        modified = cve.get("lastModified", "")
+        rows.append({
+            "CVE ID": cve.get("id", "N/A"),
+            "Published": published,
+            "Last Modified": modified,
+            "CVSS": cvss,
+            "Severity": severity.title(),
+            "Description": description,
+            "URL": f"https://nvd.nist.gov/vuln/detail/{cve.get('id', '')}",
+        })
+    return pd.DataFrame(rows)
+
+
+def cve_feed_page():
+    hero("Live CVE & Vulnerability Feed",
+         "Recent public vulnerabilities from the National Vulnerability Database (NVD).")
+    st.info("Feed data is fetched from NVD's public API. Refresh is subject to NVD availability and rate limits.")
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        limit = st.selectbox("Number of CVEs", [10, 20, 50], index=1)
+        refresh = st.button("Refresh CVE Feed", use_container_width=True)
+    if refresh:
+        fetch_recent_cves.clear()
+
+    with st.spinner("Connecting to NVD..."):
+        try:
+            cves = fetch_recent_cves(limit)
+            if cves.empty:
+                st.warning("No CVE records returned.")
+                return
+            critical = int((cves["Severity"].str.upper() == "CRITICAL").sum())
+            high = int((cves["Severity"].str.upper() == "HIGH").sum())
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Records loaded", len(cves))
+            m2.metric("Critical", critical)
+            m3.metric("High", high)
+
+            severity_filter = st.multiselect(
+                "Filter severity",
+                ["Critical", "High", "Medium", "Low", "Unknown"],
+                default=["Critical", "High", "Medium", "Low", "Unknown"]
+            )
+            filtered = cves[cves["Severity"].isin(severity_filter)].copy()
+            query = st.text_input("Search CVE ID or description")
+            if query:
+                filtered = filtered[
+                    filtered["CVE ID"].str.contains(query, case=False, na=False)
+                    | filtered["Description"].str.contains(query, case=False, na=False)
+                ]
+            st.dataframe(
+                filtered[["CVE ID", "Published", "CVSS", "Severity", "Description"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+            for _, row in filtered.head(10).iterrows():
+                with st.expander(f"{row['CVE ID']} · {row['Severity']} · CVSS {row['CVSS']}"):
+                    st.write(row["Description"])
+                    st.caption(f"Published: {row['Published']} | Modified: {row['Last Modified']}")
+                    st.link_button("Open NVD details", row["URL"])
+            st.download_button(
+                "Download CVE results (CSV)",
+                cves.to_csv(index=False).encode("utf-8"),
+                "cyberguard_cve_feed.csv",
+                "text/csv",
+            )
+        except Exception as exc:
+            st.error(f"Unable to retrieve live CVE feed: {exc}")
+            st.caption("Check the app's internet access and try again later.")
+
+
+# ==========================================================
+# NEW FEATURE 2: IP GEOLOCATION & ATTACK ORIGIN MAP
+# ==========================================================
+
+def is_public_ip(value):
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(str(value).strip())
+        return ip.is_global
+    except ValueError:
+        return False
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def geolocate_ip(ip_address):
+    """Resolve a public IP using ipwho.is. IP is sent to that service."""
+    import requests
+    response = requests.get(f"https://ipwho.is/{ip_address}", timeout=12)
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("success", False):
+        return {"IP": ip_address, "Error": result.get("message", "Lookup failed")}
+    connection = result.get("connection", {}) or {}
+    return {
+        "IP": ip_address,
+        "Country": result.get("country", "Unknown"),
+        "Region": result.get("region", "Unknown"),
+        "City": result.get("city", "Unknown"),
+        "Latitude": result.get("latitude"),
+        "Longitude": result.get("longitude"),
+        "ISP": connection.get("isp", "Unknown"),
+        "Organization": connection.get("org", "Unknown"),
+    }
+
+
+def ip_geolocation_page():
+    hero("IP Geolocation & Attack Origin Map",
+         "Map the approximate origin of public IP addresses from selected threat records.")
+    st.warning("Privacy note: IPs you submit are sent to ipwho.is for geolocation. Results are approximate and do not identify a person's exact location.")
+    default_ips = df["Source IP"].dropna().astype(str).head(8).tolist()
+    ips_text = st.text_area(
+        "Enter IP addresses (one per line)",
+        value="\n".join(default_ips),
+        height=130,
+        help="Private, reserved and invalid IP addresses are skipped."
+    )
+    if st.button("Locate IPs & Plot Map", use_container_width=True):
+        unique_ips = list(dict.fromkeys(
+            ip.strip() for ip in ips_text.splitlines() if ip.strip()
+        ))
+        public_ips = [ip for ip in unique_ips if is_public_ip(ip)]
+        rejected = [ip for ip in unique_ips if not is_public_ip(ip)]
+        if rejected:
+            st.info("Skipped non-public or invalid IPs: " + ", ".join(rejected))
+        if not public_ips:
+            st.warning("Enter at least one valid public IP address.")
+        else:
+            results = []
+            progress = st.progress(0)
+            for i, ip in enumerate(public_ips):
+                try:
+                    results.append(geolocate_ip(ip))
+                except Exception as exc:
+                    results.append({"IP": ip, "Error": str(exc)})
+                progress.progress((i + 1) / len(public_ips))
+            geo_df = pd.DataFrame(results)
+            st.session_state["cyberguard_geo_results"] = geo_df
+
+    geo_df = st.session_state.get("cyberguard_geo_results")
+    if geo_df is not None and not geo_df.empty:
+        st.dataframe(geo_df, use_container_width=True, hide_index=True)
+        mapped = geo_df.dropna(subset=["Latitude", "Longitude"]).copy()
+        if not mapped.empty:
+            fig = px.scatter_geo(
+                mapped, lat="Latitude", lon="Longitude", hover_name="IP",
+                hover_data=["Country", "Region", "City", "ISP"],
+                projection="natural earth", title="Approximate Attack Origin Locations",
+            )
+            fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            country_counts = mapped["Country"].value_counts().reset_index()
+            country_counts.columns = ["Country", "IP Count"]
+            st.subheader("Origin Summary")
+            st.bar_chart(country_counts.set_index("Country"))
+        else:
+            st.warning("No successful geolocation records to map.")
+        st.download_button(
+            "Download geolocation results",
+            geo_df.to_csv(index=False).encode("utf-8"),
+            "cyberguard_ip_geolocation.csv", "text/csv"
+        )
+
+
+# ==========================================================
+# NEW FEATURE 3: LOCAL PASSWORD & CREDENTIAL STRENGTH AUDITOR
+# ==========================================================
+
+def audit_password(password):
+    """A local heuristic auditor. Password text is not sent to any API."""
+    import math
+    length = len(password)
+    pools = 0
+    if re.search(r"[a-z]", password): pools += 26
+    if re.search(r"[A-Z]", password): pools += 26
+    if re.search(r"\d", password): pools += 10
+    if re.search(r"[^A-Za-z0-9]", password): pools += 32
+    entropy = length * math.log2(pools) if length and pools else 0
+
+    checks = {
+        "At least 12 characters": length >= 12,
+        "Contains lowercase letters": bool(re.search(r"[a-z]", password)),
+        "Contains uppercase letters": bool(re.search(r"[A-Z]", password)),
+        "Contains numbers": bool(re.search(r"\d", password)),
+        "Contains symbols": bool(re.search(r"[^A-Za-z0-9]", password)),
+        "No repeated character run (3+)": not bool(re.search(r"(.)\1{2,}", password)),
+        "No obvious common pattern": not bool(re.search(
+            r"password|qwerty|admin|welcome|letmein|123456|iloveyou",
+            password, re.I
+        )),
+    }
+    score = sum(checks.values())
+    if length < 8 or entropy < 28 or score <= 2:
+        grade = "Weak"
+    elif length >= 12 and entropy >= 60 and score >= 6:
+        grade = "Strong"
+    elif length >= 16 and entropy >= 75 and score >= 6:
+        grade = "Very Strong"
+    else:
+        grade = "Moderate"
+
+    suggestions = []
+    if length < 12: suggestions.append("Use at least 12 characters; 16+ is preferable.")
+    if not checks["Contains lowercase letters"]: suggestions.append("Add lowercase letters.")
+    if not checks["Contains uppercase letters"]: suggestions.append("Add uppercase letters.")
+    if not checks["Contains numbers"]: suggestions.append("Add digits.")
+    if not checks["Contains symbols"]: suggestions.append("Add symbols.")
+    if not checks["No repeated character run (3+)"]: suggestions.append("Avoid repeated characters.")
+    if not checks["No obvious common pattern"]: suggestions.append("Avoid common words and predictable sequences.")
+    if not suggestions: suggestions.append("Use a unique password and store it in a reputable password manager.")
+    return {"length": length, "entropy": round(entropy, 1), "grade": grade,
+            "checks": checks, "suggestions": suggestions}
+
+
+def password_auditor_page():
+    hero("Password & Credential Strength Auditor",
+         "Evaluate password characteristics locally in your browser session.")
+    st.info("The password is evaluated in this app session only and is not sent to Groq or an external password-check service. Avoid entering a real password; test a sample instead.")
+    password = st.text_input("Test password", type="password")
+    if password:
+        result = audit_password(password)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Strength", result["grade"])
+        c2.metric("Length", result["length"])
+        c3.metric("Estimated entropy", f"{result['entropy']} bits")
+        st.progress(min(100, int(result["entropy"] / 100 * 100)))
+        st.subheader("Checklist")
+        for label, passed in result["checks"].items():
+            st.write(("✅ " if passed else "❌ ") + label)
+        st.subheader("Recommendations")
+        for suggestion in result["suggestions"]:
+            st.markdown("- " + suggestion)
+        st.caption("Entropy is a rough character-pool estimate, not a breach check or guaranteed crack-time calculation.")
+
+
+# ==========================================================
+# NEW FEATURE 4: VOICE DASHBOARD NAVIGATION & BRIEFINGS
+# ==========================================================
+
+def voice_navigation_page():
+    hero("Voice Navigation & Threat Briefings",
+         "Use speech to open dashboard sections or request a short security briefing.")
+    st.write("Try saying: 'Open CVE feed', 'Show threat analysis', 'Open IP map', 'Go to password auditor', or 'Give me a threat briefing'.")
+    if client is None:
+        st.error("Voice navigation transcription requires GROQ_API_KEY in Streamlit Secrets.")
+        return
+
+    audio = st.audio_input("Record a navigation command or briefing request", sample_rate=16000, key="voice_nav_audio")
+    if audio is not None:
+        audio_bytes = audio.getvalue()
+        if st.session_state.get("voice_nav_last_audio") != audio_bytes:
+            st.session_state["voice_nav_last_audio"] = audio_bytes
+            try:
+                with st.spinner("Transcribing your command..."):
+                    transcript = client.audio.transcriptions.create(
+                        model=STT_MODEL,
+                        file=("voice_command.wav", audio_bytes, "audio/wav"),
+                        response_format="json"
+                    ).text.strip()
+                st.session_state["voice_nav_transcript"] = transcript
+            except Exception as exc:
+                st.error(f"Transcription failed: {exc}")
+
+    transcript = st.session_state.get("voice_nav_transcript", "")
+    if transcript:
+        st.markdown(f"**Recognized command:** {transcript}")
+        nav_keywords = {
+            "Dashboard": ["dashboard", "home", "overview"],
+            "Threat Analysis": ["threat analysis", "analyse threat", "analyze threat"],
+            "IOC & Phishing Scanner": ["ioc", "phishing scanner", "scan indicator"],
+            "Threat Intelligence": ["threat intelligence", "intelligence"],
+            "Expert System": ["expert system", "mitre", "playbook"],
+            "AI Prediction": ["prediction", "predict risk"],
+            "System Workflow": ["workflow"],
+            "Reports": ["report", "logs"],
+            "AI Assistant": ["ai assistant", "chat assistant", "chat"],
+            "Voice Assistant": ["voice assistant", "speech assistant"],
+            "Live CVE Feed": ["cve", "vulnerability", "vulnerabilities"],
+            "IP Geolocation Map": ["ip map", "geolocation", "attack origin", "world map"],
+            "Password Auditor": ["password", "credential", "password auditor"],
+            "Voice Navigation": ["voice navigation", "voice command"],
+            "Simulation Sandbox": ["simulation", "sandbox", "simulate attack"],
+        }
+        lowered = transcript.lower()
+        destination = next(
+            (page for page, phrases in nav_keywords.items()
+             if any(phrase in lowered for phrase in phrases)),
+            None
+        )
+        is_briefing = any(word in lowered for word in ["briefing", "summarize", "summary", "status update"])
+        if destination and not is_briefing:
+            st.success(f"Navigation destination: {destination}")
+            st.session_state["voice_nav_destination"] = destination
+        elif is_briefing:
+            st.session_state["voice_nav_destination"] = "Briefing"
+            if st.button("Generate Spoken Threat Briefing", use_container_width=True):
+                summary = (
+                    f"CyberGuard demonstration dataset contains {len(df)} events, "
+                    f"{int((df['Severity']=='Critical').sum())} critical and "
+                    f"{int((df['Severity']=='High').sum())} high-severity events. "
+                    f"{int((df['Status']=='Blocked').sum())} events are marked blocked. "
+                    "These are synthetic sample records, not live telemetry."
+                )
+                with st.spinner("Preparing briefing..."):
+                    briefing = ask_groq(summary + " Provide a concise spoken security briefing.", voice_mode=True)
+                    try:
+                        audio_reply = generate_female_audio(briefing)
+                        st.audio(audio_reply, format="audio/mp3", autoplay=True)
+                    except Exception as exc:
+                        st.warning(f"Speech synthesis failed: {exc}")
+                    st.markdown(briefing)
+        else:
+            st.warning("Command not recognized. Try one of the examples above.")
+
+    destinations = [
+        "Dashboard", "Threat Analysis", "IOC & Phishing Scanner", "Threat Intelligence",
+        "Expert System", "AI Prediction", "System Workflow", "Reports", "AI Assistant",
+        "Voice Assistant", "Live CVE Feed", "IP Geolocation Map", "Password Auditor",
+        "Voice Navigation", "Simulation Sandbox"
+    ]
+    selected = st.selectbox(
+        "Or select destination manually",
+        destinations,
+        index=destinations.index(st.session_state.get("voice_nav_destination", "Dashboard"))
+        if st.session_state.get("voice_nav_destination") in destinations else 0
+    )
+    st.session_state["voice_nav_destination"] = selected
+    if st.button("Open Selected Dashboard Section", use_container_width=True):
+        page = PAGE_REGISTRY.get(selected)
+        if page is not None:
+            st.switch_page(page)
+        else:
+            st.info("Select a destination from the sidebar.")
+
+
+# ==========================================================
+# NEW FEATURE 5: SAFE CYBER ATTACK SIMULATION SANDBOX
+# ==========================================================
+
+def simulation_sandbox_page():
+    hero("Cyber Attack Simulation Sandbox",
+         "Run educational, local-only scenarios. No packets, exploits, credentials or attacks are sent.")
+    st.warning("This sandbox only generates illustrative simulation events and charts. It does not attack any system.")
+    scenario = st.selectbox(
+        "Simulation scenario",
+        ["Phishing Awareness", "Brute-Force Login Pattern", "DDoS Traffic Spike",
+         "Malware Incident Response", "SQL Injection Detection"]
+    )
+    intensity = st.slider("Simulation intensity", 1, 10, 5)
+    duration = st.slider("Simulation duration (seconds represented)", 10, 120, 60)
+    if st.button("Run Safe Simulation", use_container_width=True):
+        rng = random.Random(2026 + intensity)
+        count = max(20, duration)
+        times = list(range(count))
+        if scenario == "Phishing Awareness":
+            values = [rng.randint(0, 8) + (intensity if i % 9 == 0 else 0) for i in times]
+            label = "Suspicious email reports"
+            outcome = "Simulated phishing indicators were identified. Recommended: report, quarantine, and verify links."
+        elif scenario == "Brute-Force Login Pattern":
+            values = [rng.randint(0, 3) + (intensity * 3 if i % 7 in (0, 1) else 0) for i in times]
+            label = "Failed login attempts"
+            outcome = "Burst login failures simulated. Recommended: rate-limit, MFA, account protections, and log review."
+        elif scenario == "DDoS Traffic Spike":
+            values = [rng.randint(10, 35) + (intensity * 8 if 15 <= i <= 25 else 0) for i in times]
+            label = "Illustrative traffic units"
+            outcome = "Traffic spike simulated. Recommended: activate mitigation, check service health, and contact provider."
+        elif scenario == "Malware Incident Response":
+            values = [rng.randint(0, 5) + (intensity * 4 if 10 <= i <= 18 else 0) for i in times]
+            label = "Endpoint alert units"
+            outcome = "Endpoint alerts simulated. Recommended: isolate endpoint, preserve evidence, investigate, and restore from clean backup."
+        else:
+            values = [rng.randint(0, 4) + (intensity * 5 if i % 10 in (3, 4) else 0) for i in times]
+            label = "SQL injection rule hits"
+            outcome = "Injection-like patterns simulated. Recommended: parameterized queries, validation, WAF rules, and log review."
+        sim_df = pd.DataFrame({"Time index": times, label: values})
+        st.session_state["sandbox_result"] = {"scenario": scenario, "data": sim_df, "outcome": outcome}
+    result = st.session_state.get("sandbox_result")
+    if result:
+        st.subheader(result["scenario"])
+        st.line_chart(result["data"].set_index("Time index"))
+        st.metric("Peak simulated indicator", int(result["data"].iloc[:, 1].max()))
+        st.info(result["outcome"])
+        st.dataframe(result["data"], use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download simulation CSV",
+            result["data"].to_csv(index=False).encode("utf-8"),
+            "cyberguard_simulation.csv", "text/csv"
+        )
+        if client is not None and st.button("Explain Simulation with CyberGuard AI"):
+            with st.spinner("Generating explanation..."):
+                explanation = ask_groq(
+                    f"Explain this safe educational simulation and defensive response: {result['scenario']}. "
+                    f"Peak indicator: {int(result['data'].iloc[:, 1].max())}. "
+                    f"Context: {result['outcome']}"
+                )
+                st.markdown(explanation)
+
+
+
+
 # ==========================================================
 # SIDEBAR AND NAVIGATION
 # ==========================================================
@@ -1127,18 +1569,24 @@ st.sidebar.markdown(
 )
 st.sidebar.caption("AI-assisted cybersecurity demonstration platform")
 
-pages = [
-    st.Page(dashboard_page, title="Dashboard", icon="🏠", default=True),
-    st.Page(threat_analysis_page, title="Threat Analysis", icon="🔍"),
-    st.Page(ioc_scanner_page, title="IOC & Phishing Scanner", icon="🧪"),
-    st.Page(threat_intelligence_page, title="Threat Intelligence", icon="🌐"),
-    st.Page(expert_system_page, title="Expert System", icon="🧠"),
-    st.Page(ai_prediction_page, title="AI Prediction", icon="📈"),
-    st.Page(workflow_page, title="System Workflow", icon="⚙️"),
-    st.Page(reports_page, title="Reports", icon="📊"),
-    st.Page(ai_assistant_page, title="AI Assistant", icon="💬"),
-    st.Page(voice_assistant_page, title="Voice Assistant", icon="🎙️"),
-]
+PAGE_REGISTRY = {
+    "Dashboard": st.Page(dashboard_page, title="Dashboard", icon="🏠", default=True),
+    "Threat Analysis": st.Page(threat_analysis_page, title="Threat Analysis", icon="🔍"),
+    "IOC & Phishing Scanner": st.Page(ioc_scanner_page, title="IOC & Phishing Scanner", icon="🧪"),
+    "Threat Intelligence": st.Page(threat_intelligence_page, title="Threat Intelligence", icon="🌐"),
+    "Expert System": st.Page(expert_system_page, title="Expert System", icon="🧠"),
+    "AI Prediction": st.Page(ai_prediction_page, title="AI Prediction", icon="📈"),
+    "System Workflow": st.Page(workflow_page, title="System Workflow", icon="⚙️"),
+    "Reports": st.Page(reports_page, title="Reports", icon="📊"),
+    "AI Assistant": st.Page(ai_assistant_page, title="AI Assistant", icon="💬"),
+    "Voice Assistant": st.Page(voice_assistant_page, title="Voice Assistant", icon="🎙️"),
+    "Live CVE Feed": st.Page(cve_feed_page, title="Live CVE Feed", icon="🧬"),
+    "IP Geolocation Map": st.Page(ip_geolocation_page, title="IP Geolocation Map", icon="🗺️"),
+    "Password Auditor": st.Page(password_auditor_page, title="Password Auditor", icon="🔐"),
+    "Voice Navigation": st.Page(voice_navigation_page, title="Voice Navigation", icon="🗣️"),
+    "Simulation Sandbox": st.Page(simulation_sandbox_page, title="Simulation Sandbox", icon="🧪"),
+}
+pages = list(PAGE_REGISTRY.values())
 
 navigation = st.navigation(pages, position="sidebar")
 navigation.run()
