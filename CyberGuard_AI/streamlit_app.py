@@ -1,14 +1,15 @@
-
-import os
-import random
+import asyncio
 from datetime import datetime, timedelta
 from io import BytesIO
+import os
+import random
+import re
 
+import edge_tts
+from groq import Groq
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from groq import Groq
-from gtts import gTTS
 
 
 # ==========================================================
@@ -30,7 +31,8 @@ STT_MODEL = "whisper-large-v3-turbo"
 # CUSTOM CSS
 # ==========================================================
 
-st.markdown("""
+st.markdown(
+    """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
@@ -157,12 +159,15 @@ footer {
     }
 }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 # ==========================================================
 # GROQ API CONFIGURATION
 # ==========================================================
+
 
 def get_api_key():
     try:
@@ -185,6 +190,7 @@ client = get_groq_client()
 # ==========================================================
 # DEMONSTRATION THREAT DATA
 # ==========================================================
+
 
 @st.cache_data
 def create_demo_data():
@@ -249,6 +255,7 @@ df = create_demo_data()
 # COMMON FUNCTIONS
 # ==========================================================
 
+
 def hero(title, subtitle):
     st.markdown(
         f"""
@@ -275,11 +282,11 @@ def metric_card(label, value):
 
 
 # ==========================================================
-# AI CHAT FUNCTION
+# AI CHAT & VOICE FUNCTIONS
 # ==========================================================
 
 SYSTEM_PROMPT = """
-You are CyberGuard AI, a cybersecurity analysis assistant.
+You are CyberGuard AI, an intelligent cybersecurity analysis assistant.
 
 Help users understand:
 - Malware and ransomware
@@ -288,22 +295,29 @@ Help users understand:
 - DDoS attacks
 - SQL injection
 - Suspicious login activity
-- Cybersecurity incident response
+- MITRE ATT&CK frameworks and incident response playbooks
 - Defensive security recommendations
 
-Give clear, practical and ethical defensive guidance.
+Give clear, practical, and ethical defensive guidance.
 Do not claim to have scanned a real network.
 """
 
+VOICE_SYSTEM_PROMPT = """
+You are CyberGuard AI, a female cybersecurity voice assistant.
+Keep your answers concise, conversational, natural to listen to (3 to 5 sentences max),
+and free of markdown symbols like asterisks, hashtags, or bullet points so the speech synthesis sounds completely human.
+"""
 
-def ask_groq(question, history=None):
+
+def ask_groq(question, history=None, voice_mode=False):
     if client is None:
         return (
             "GROQ_API_KEY is missing. Add your Groq API key "
             "in Streamlit Cloud Secrets."
         )
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    sys_prompt = VOICE_SYSTEM_PROMPT if voice_mode else SYSTEM_PROMPT
+    messages = [{"role": "system", "content": sys_prompt}]
 
     if history:
         messages.extend(history[-8:])
@@ -317,7 +331,7 @@ def ask_groq(question, history=None):
         response = client.chat.completions.create(
             model=CHAT_MODEL,
             messages=messages,
-            max_completion_tokens=1400,
+            max_completion_tokens=450 if voice_mode else 1400,
         )
         return response.choices[0].message.content or "No response received."
 
@@ -326,41 +340,41 @@ def ask_groq(question, history=None):
 
 
 # ==========================================================
-# AUDIO GENERATION USING gTTS
+# FEMALE VOICE GENERATION USING EDGE-TTS
 # ==========================================================
 
-def generate_audio(text):
-    """
-    Generate an MP3 audio response using gTTS.
-    No Groq TTS model or Orpheus terms acceptance is required.
-    """
 
-    clean_text = str(text).strip()
+async def _generate_edge_tts_async(text: str, voice: str) -> bytes:
+    communicate = edge_tts.Communicate(text, voice)
+    audio_buffer = BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_buffer.write(chunk["data"])
+    audio_buffer.seek(0)
+    return audio_buffer.getvalue()
+
+
+def generate_female_audio(
+    text: str, voice: str = "en-US-AriaNeural"
+) -> bytes:
+    """
+    Generate natural female neural speech using Edge-TTS.
+    """
+    clean_text = re.sub(r"[*#_`>-]", "", str(text)).strip()
 
     if not clean_text:
         raise ValueError("There is no response text to convert to audio.")
 
-    # Keep the request at a manageable length.
-    if len(clean_text) > 3500:
-        clean_text = clean_text[:3500]
+    if len(clean_text) > 3000:
+        clean_text = clean_text[:3000]
 
-    audio_buffer = BytesIO()
-
-    tts = gTTS(
-        text=clean_text,
-        lang="en",
-        slow=False,
-    )
-
-    tts.write_to_fp(audio_buffer)
-    audio_buffer.seek(0)
-
-    return audio_buffer.getvalue()
+    return asyncio.run(_generate_edge_tts_async(clean_text, voice))
 
 
 # ==========================================================
 # DASHBOARD
 # ==========================================================
+
 
 def dashboard_page():
     hero(
@@ -448,6 +462,7 @@ def dashboard_page():
 # THREAT ANALYSIS
 # ==========================================================
 
+
 def threat_analysis_page():
     hero(
         "Threat Analysis",
@@ -459,7 +474,9 @@ def threat_analysis_page():
 
         failed_logins = st.slider(
             "Failed login attempts",
-            0, 100, 5,
+            0,
+            100,
+            5,
         )
 
         traffic = st.selectbox(
@@ -492,10 +509,13 @@ def threat_analysis_page():
         )
 
         level = (
-            "CRITICAL" if score >= 80 else
-            "HIGH" if score >= 60 else
-            "MEDIUM" if score >= 30 else
-            "LOW"
+            "CRITICAL"
+            if score >= 80
+            else "HIGH"
+            if score >= 60
+            else "MEDIUM"
+            if score >= 30
+            else "LOW"
         )
 
         st.metric("Illustrative Risk Score", f"{score:.1f}/100")
@@ -518,8 +538,97 @@ def threat_analysis_page():
 
 
 # ==========================================================
+# IOC & PHISHING SCANNER (NEW FEATURE)
+# ==========================================================
+
+
+def ioc_scanner_page():
+    hero(
+        "IOC & Phishing Scanner",
+        "Inspect suspicious IP addresses, URLs, file hashes, or email headers.",
+    )
+
+    scan_type = st.radio(
+        "Select Indicator Type",
+        [
+            "Suspicious IP / Domain / URL",
+            "SHA-256 / MD5 File Hash",
+            "Phishing Email / Header Snippet",
+        ],
+        horizontal=True,
+    )
+
+    ioc_input = st.text_area(
+        "Paste indicator or suspicious content here:",
+        placeholder="e.g., http://secure-login-verify-update.com/auth or 185.220.101.45",
+        height=130,
+    )
+
+    if st.button("Scan Indicator", use_container_width=True):
+        if not ioc_input.strip():
+            st.warning("Please enter an indicator or email snippet to scan.")
+        else:
+            flags = []
+            risk_points = 15
+
+            lower_val = ioc_input.lower()
+            if any(
+                k in lower_val
+                for k in ["login", "verify", "urgent", "bank", "update", "free"]
+            ):
+                flags.append(
+                    "High-risk social engineering / credential harvesting keywords detected."
+                )
+                risk_points += 35
+            if "http://" in lower_val:
+                flags.append(
+                    "Unencrypted HTTP protocol detected (lacks TLS/SSL)."
+                )
+                risk_points += 20
+            if re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", ioc_input):
+                flags.append(
+                    "Direct IPv4 address reference detected in payload."
+                )
+                risk_points += 20
+            if len(ioc_input.strip()) in (32, 40, 64) and " " not in ioc_input:
+                flags.append(
+                    "Cryptographic hash format recognized (MD5/SHA-1/SHA-256)."
+                )
+                risk_points += 25
+
+            risk_points = min(98, risk_points)
+
+            col1, col2 = st.columns(2)
+            col1.metric("Heuristic Threat Score", f"{risk_points}/100")
+            col2.metric(
+                "Classification",
+                "Suspicious / Malicious"
+                if risk_points >= 55
+                else "Low Risk / Benign",
+            )
+
+            if flags:
+                st.subheader("Detected Risk Indicators")
+                for f in flags:
+                    st.warning(f)
+            else:
+                st.success(
+                    "No immediate heuristic red flags matched in local pattern rules."
+                )
+
+            if client is not None:
+                with st.spinner("Running AI Threat Intelligence lookup..."):
+                    ai_verdict = ask_groq(
+                        f"Analyze this {scan_type} for cybersecurity threats and explain what an analyst should check: {ioc_input[:1000]}"
+                    )
+                    st.subheader("AI Analyst Assessment")
+                    st.markdown(ai_verdict)
+
+
+# ==========================================================
 # THREAT INTELLIGENCE
 # ==========================================================
+
 
 def threat_intelligence_page():
     hero(
@@ -532,9 +641,11 @@ def threat_intelligence_page():
     filtered = df.copy()
 
     if search:
-        mask = filtered.astype(str).apply(
-            lambda col: col.str.contains(search, case=False, na=False)
-        ).any(axis=1)
+        mask = (
+            filtered.astype(str)
+            .apply(lambda col: col.str.contains(search, case=False, na=False))
+            .any(axis=1)
+        )
         filtered = filtered[mask]
 
     st.write(f"Records found: {len(filtered)}")
@@ -549,13 +660,14 @@ def threat_intelligence_page():
 
 
 # ==========================================================
-# EXPERT SYSTEM
+# EXPERT SYSTEM (UPGRADED WITH MITRE ATT&CK + CLI PLAYBOOKS)
 # ==========================================================
+
 
 def expert_system_page():
     hero(
         "Cybersecurity Expert System",
-        "Rule-based threat interpretation and defensive recommendations.",
+        "Rule-based threat interpretation, MITRE ATT&CK mapping, and response playbooks.",
     )
 
     threat = st.selectbox(
@@ -572,64 +684,94 @@ def expert_system_page():
     )
 
     rules = {
-        "Phishing": [
-            "Do not open suspicious links or attachments.",
-            "Verify the sender through a trusted channel.",
-            "Block and report the suspicious sender.",
-            "Reset credentials if they may have been exposed.",
-        ],
-        "Malware": [
-            "Isolate the affected endpoint.",
-            "Run an approved endpoint security scan.",
-            "Preserve logs and suspicious files for investigation.",
-            "Restore from a verified clean backup if necessary.",
-        ],
-        "Ransomware": [
-            "Isolate affected systems immediately.",
-            "Preserve forensic evidence.",
-            "Notify the incident response team.",
-            "Restore only from verified clean backups.",
-        ],
-        "Brute Force": [
-            "Block abusive source addresses where appropriate.",
-            "Enforce multi-factor authentication.",
-            "Apply rate limiting and account lockout policies.",
-            "Review authentication logs.",
-        ],
-        "DDoS": [
-            "Activate the organisation's DDoS response plan.",
-            "Use approved upstream traffic mitigation.",
-            "Monitor service availability.",
-            "Contact the hosting or network provider.",
-        ],
-        "SQL Injection": [
-            "Use parameterised database queries.",
-            "Validate and safely handle user input.",
-            "Review application and database logs.",
-            "Patch the affected application.",
-        ],
-        "Suspicious Login": [
-            "Verify the login with the account owner.",
-            "Review device and location information.",
-            "Revoke suspicious sessions.",
-            "Enable multi-factor authentication.",
-        ],
+        "Phishing": {
+            "mitre": "T1566 - Phishing (Initial Access)",
+            "actions": [
+                "Do not open suspicious links or attachments.",
+                "Verify the sender through a trusted channel.",
+                "Block and report the suspicious sender domain.",
+                "Reset credentials if they may have been exposed.",
+            ],
+            "playbook": "# Quarantine email & block sender domain\npostsuper -h <QUEUE_ID>\necho 'malicious-sender.com REJECT' >> /etc/postfix/sender_access",
+        },
+        "Malware": {
+            "mitre": "T1204 - User Execution (Execution)",
+            "actions": [
+                "Isolate the affected endpoint from the network.",
+                "Run an approved endpoint security scan.",
+                "Preserve logs and suspicious files for investigation.",
+                "Restore from a verified clean backup if necessary.",
+            ],
+            "playbook": "# Isolate compromised host & kill suspicious PID\niptables -P INPUT DROP && iptables -P OUTPUT DROP\nkill -9 <SUSPICIOUS_PID>",
+        },
+        "Ransomware": {
+            "mitre": "T1486 - Data Encrypted for Impact (Impact)",
+            "actions": [
+                "Isolate affected systems immediately.",
+                "Preserve forensic evidence and volatile memory.",
+                "Notify the incident response team.",
+                "Restore only from verified clean offline backups.",
+            ],
+            "playbook": "# Disable SMB shares immediately to stop lateral spread\nsystemctl stop smbd nmbd\nnetsh advfirewall firewall set allprofiles state on",
+        },
+        "Brute Force": {
+            "mitre": "T1110 - Brute Force (Credential Access)",
+            "actions": [
+                "Block abusive source addresses where appropriate.",
+                "Enforce multi-factor authentication.",
+                "Apply rate limiting and account lockout policies.",
+                "Review authentication logs.",
+            ],
+            "playbook": "# Block offending IP via UFW / iptables\nufw deny from <SOURCE_IP> to any\nfail2ban-client set sshd banip <SOURCE_IP>",
+        },
+        "DDoS": {
+            "mitre": "T1498 - Network Denial of Service (Impact)",
+            "actions": [
+                "Activate the organisation's DDoS response plan.",
+                "Use approved upstream traffic mitigation.",
+                "Monitor service availability.",
+                "Contact the hosting or network provider.",
+            ],
+            "playbook": "# Enable SYN cookies & rate-limit incoming connections\nsysctl -w net.ipv4.tcp_syncookies=1\niptables -A INPUT -p tcp --syn -m limit --limit 1/s --limit-burst 3 -j ACCEPT",
+        },
+        "SQL Injection": {
+            "mitre": "T1190 - Exploit Public-Facing Application (Initial Access)",
+            "actions": [
+                "Use parameterised database queries.",
+                "Validate and safely handle user input.",
+                "Review application and database logs.",
+                "Patch the affected application and enable WAF rules.",
+            ],
+            "playbook": "# Enable ModSecurity WAF blocking mode\nsed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' /etc/modsecurity/modsecurity.conf\nsystemctl reload apache2",
+        },
+        "Suspicious Login": {
+            "mitre": "T1078 - Valid Accounts (Persistence / Defense Evasion)",
+            "actions": [
+                "Verify the login with the account owner.",
+                "Review device and location information.",
+                "Revoke suspicious sessions and active tokens.",
+                "Enable multi-factor authentication.",
+            ],
+            "playbook": "# Force password reset & invalidate active sessions\npasswd -e <COMPROMISED_USER>\npkill -KILL -u <COMPROMISED_USER>",
+        },
     }
 
-    if st.button("Generate Expert Recommendation"):
-        st.subheader("Recommended Defensive Actions")
+    if st.button("Generate Expert Recommendation", use_container_width=True):
+        selected = rules[threat]
+        st.info(f"**MITRE ATT&CK Mapping:** {selected['mitre']}")
 
-        for item in rules[threat]:
+        st.subheader("Recommended Defensive Actions")
+        for item in selected["actions"]:
             st.markdown(f"- {item}")
 
-        st.info(
-            "Recommendations are based on predefined demonstration rules."
-        )
+        st.subheader("Automated Incident Response Playbook (CLI)")
+        st.code(selected["playbook"], language="bash")
 
 
 # ==========================================================
 # AI PREDICTION
 # ==========================================================
+
 
 def ai_prediction_page():
     hero(
@@ -680,6 +822,7 @@ def ai_prediction_page():
 # SYSTEM WORKFLOW
 # ==========================================================
 
+
 def workflow_page():
     hero(
         "System Workflow",
@@ -687,12 +830,36 @@ def workflow_page():
     )
 
     steps = [
-        ("01", "Data Input", "Security event or suspicious activity is entered."),
-        ("02", "Preprocessing", "Input indicators are organised for analysis."),
-        ("03", "Threat Analysis", "Threat characteristics and risk indicators are evaluated."),
-        ("04", "Expert System", "Predefined rules generate defensive recommendations."),
-        ("05", "AI Assistance", "The assistant explains findings and security actions."),
-        ("06", "Reporting", "Results are displayed for review and documentation."),
+        (
+            "01",
+            "Data Input",
+            "Security event, log file, or suspicious activity is entered.",
+        ),
+        (
+            "02",
+            "Preprocessing",
+            "Input indicators are organised for analysis.",
+        ),
+        (
+            "03",
+            "Threat Analysis",
+            "Threat characteristics and risk indicators are evaluated.",
+        ),
+        (
+            "04",
+            "Expert System",
+            "Predefined rules and MITRE ATT&CK mappings generate defensive playbooks.",
+        ),
+        (
+            "05",
+            "AI & Voice Assistance",
+            "Groq LLM and neural female speech synthesis explain findings interactively.",
+        ),
+        (
+            "06",
+            "Reporting",
+            "Results are displayed and exported for documentation.",
+        ),
     ]
 
     for number, title, description in steps:
@@ -708,38 +875,65 @@ def workflow_page():
 
 
 # ==========================================================
-# REPORTS
+# REPORTS (UPGRADED WITH CSV LOG UPLOADER)
 # ==========================================================
+
 
 def reports_page():
     hero(
-        "Security Reports",
-        "Review and export the demonstration threat-event dataset.",
+        "Security Reports & Log Ingestion",
+        "Upload custom security logs or export the threat-event dataset.",
     )
+
+    uploaded_file = st.file_uploader(
+        "Upload Custom Security Log (CSV)",
+        type=["csv"],
+        help="Upload a CSV file containing security logs to preview and analyze.",
+    )
+
+    active_df = df
+    if uploaded_file is not None:
+        try:
+            active_df = pd.read_csv(uploaded_file)
+            st.success(
+                f"Loaded custom log file: {uploaded_file.name} ({len(active_df)} rows)"
+            )
+        except Exception as e:
+            st.error(f"Error reading uploaded file: {e}")
 
     c1, c2, c3 = st.columns(3)
 
-    c1.metric("Total Events", len(df))
+    c1.metric("Total Events", len(active_df))
     c2.metric(
         "Critical Events",
-        int((df["Severity"] == "Critical").sum()),
+        int((active_df["Severity"] == "Critical").sum())
+        if "Severity" in active_df.columns
+        else "N/A",
     )
     c3.metric(
         "Blocked Events",
-        int((df["Status"] == "Blocked").sum()),
+        int((active_df["Status"] == "Blocked").sum())
+        if "Status" in active_df.columns
+        else "N/A",
     )
 
     st.subheader("Threat Event Report")
 
+    display_df = (
+        active_df.sort_values("Timestamp", ascending=False)
+        if "Timestamp" in active_df.columns
+        else active_df
+    )
+
     st.dataframe(
-        df.sort_values("Timestamp", ascending=False),
+        display_df,
         use_container_width=True,
         hide_index=True,
     )
 
     st.download_button(
         "Download CSV Report",
-        data=df.to_csv(index=False).encode("utf-8"),
+        data=active_df.to_csv(index=False).encode("utf-8"),
         file_name="cyberguard_threat_report.csv",
         mime="text/csv",
         use_container_width=True,
@@ -747,8 +941,9 @@ def reports_page():
 
 
 # ==========================================================
-# AI ASSISTANT
+# AI ASSISTANT (GROQ CHATBOT)
 # ==========================================================
+
 
 def ai_assistant_page():
     hero(
@@ -779,6 +974,7 @@ def ai_assistant_page():
                 answer = ask_groq(
                     prompt,
                     st.session_state.chat_history[:-1],
+                    voice_mode=False,
                 )
             st.markdown(answer)
 
@@ -793,13 +989,14 @@ def ai_assistant_page():
 
 
 # ==========================================================
-# VOICE ASSISTANT
+# SPEECH-TO-SPEECH FEMALE VOICE ASSISTANT
 # ==========================================================
+
 
 def voice_assistant_page():
     hero(
-        "CyberGuard Voice Assistant",
-        "Record your question, receive an AI response, and generate audio.",
+        "CyberGuard Speech-to-Speech Assistant",
+        "Speak directly to CyberGuard AI and receive an instant spoken female voice response.",
     )
 
     if client is None:
@@ -808,114 +1005,102 @@ def voice_assistant_page():
         )
         return
 
-    if "voice_question" not in st.session_state:
-        st.session_state.voice_question = ""
-
-    if "voice_answer" not in st.session_state:
-        st.session_state.voice_answer = ""
-
     if "voice_history" not in st.session_state:
         st.session_state.voice_history = []
 
-    st.subheader("Step 1 — Record your question")
+    if "last_processed_audio" not in st.session_state:
+        st.session_state.last_processed_audio = None
 
-    audio_file = st.audio_input(
-        "Record your question",
-        sample_rate=16000,
-        key="cyberguard_audio_input",
+    if "latest_voice_reply_audio" not in st.session_state:
+        st.session_state.latest_voice_reply_audio = None
+
+    # Female Voice Accent Selector
+    voice_choice = st.selectbox(
+        "Select Female Assistant Voice",
+        options=[
+            "en-US-AriaNeural (US English - Female)",
+            "en-IN-NeerjaNeural (Indian English - Female)",
+            "en-GB-SoniaNeural (British English - Female)",
+        ],
+        index=0,
+    )
+    selected_voice_id = voice_choice.split(" ")[0]
+
+    st.markdown("---")
+    st.subheader("🎙️ Speak to CyberGuard AI")
+    st.caption(
+        "Click the microphone icon below to record your question. Once you stop recording, CyberGuard AI will automatically reply by voice."
     )
 
-    if st.button("Recognise Voice and Ask AI", use_container_width=True):
-        if audio_file is None:
-            st.warning("Please record your question first.")
-        else:
+    audio_file = st.audio_input(
+        "Record your voice query",
+        sample_rate=16000,
+        key="cyberguard_s2s_audio",
+    )
+
+    # Automatically trigger Speech -> AI -> Female Speech when new audio is recorded
+    if audio_file is not None:
+        audio_bytes = audio_file.getvalue()
+
+        if audio_bytes != st.session_state.last_processed_audio:
+            st.session_state.last_processed_audio = audio_bytes
+
             try:
-                with st.spinner("Converting speech to text..."):
+                with st.spinner("Listening & thinking..."):
+                    # 1. Speech to Text via Groq Whisper
                     transcript = client.audio.transcriptions.create(
                         model=STT_MODEL,
                         file=(
                             "cyberguard_recording.wav",
-                            audio_file.getvalue(),
+                            audio_bytes,
                             "audio/wav",
                         ),
                         response_format="json",
                     )
 
-                question = transcript.text.strip()
+                    question = transcript.text.strip()
 
-                if not question:
-                    st.warning("No speech was detected. Please try again.")
-                else:
-                    st.session_state.voice_question = question
-
-                    with st.spinner("CyberGuard AI is preparing a response..."):
+                    if not question:
+                        st.warning(
+                            "No speech was detected. Please try speaking again."
+                        )
+                    else:
+                        # 2. AI Reasoning via Groq
                         answer = ask_groq(
                             question,
                             st.session_state.voice_history,
+                            voice_mode=True,
                         )
 
-                    st.session_state.voice_answer = answer
+                        st.session_state.voice_history.extend([
+                            {"role": "user", "content": question},
+                            {"role": "assistant", "content": answer},
+                        ])
 
-                    st.session_state.voice_history.extend([
-                        {"role": "user", "content": question},
-                        {"role": "assistant", "content": answer},
-                    ])
-
-                    st.session_state.generated_voice_audio = None
-
-            except Exception as exc:
-                st.error(f"Voice recognition error: {str(exc)}")
-
-    if st.session_state.voice_question:
-        st.subheader("Step 2 — Recognised Question")
-        st.info(st.session_state.voice_question)
-
-    if st.session_state.voice_answer:
-        st.subheader("Step 3 — AI Response")
-        st.markdown(st.session_state.voice_answer)
-
-        st.subheader("Step 4 — Generate Audio")
-
-        if st.button("Generate Audio Response", use_container_width=True):
-            try:
-                with st.spinner("Generating audio..."):
-                    audio_bytes = generate_audio(
-                        st.session_state.voice_answer
-                    )
-
-                st.session_state.generated_voice_audio = audio_bytes
-                st.success("Audio generated successfully.")
+                        # 3. Text to Natural Female Speech via Edge-TTS
+                        reply_audio = generate_female_audio(
+                            answer, voice=selected_voice_id
+                        )
+                        st.session_state.latest_voice_reply_audio = reply_audio
 
             except Exception as exc:
-                st.error(
-                    "Audio generation error: "
-                    f"{str(exc)}"
-                )
+                st.error(f"Speech-to-Speech error: {str(exc)}")
 
-        if st.session_state.get("generated_voice_audio"):
-            st.audio(
-                st.session_state.generated_voice_audio,
-                format="audio/mp3",
-            )
+    # Autoplay the female voice response directly (pure speech-to-speech experience)
+    if st.session_state.latest_voice_reply_audio is not None:
+        st.success("🔊 CyberGuard AI Response:")
+        st.audio(
+            st.session_state.latest_voice_reply_audio,
+            format="audio/mp3",
+            autoplay=True,
+        )
 
-            st.download_button(
-                "Download Audio",
-                data=st.session_state.generated_voice_audio,
-                file_name="cyberguard_response.mp3",
-                mime="audio/mpeg",
-            )
-
-    if st.button("Clear Voice Conversation"):
-        st.session_state.voice_question = ""
-        st.session_state.voice_answer = ""
+    st.write("")
+    if st.button("Reset Voice Session"):
         st.session_state.voice_history = []
-        st.session_state.generated_voice_audio = None
+        st.session_state.last_processed_audio = None
+        st.session_state.latest_voice_reply_audio = None
         st.rerun()
-
-    st.caption(
-        "The microphone starts recording only after you use the recording control. "
-        "The browser does not continuously listen in the background."
-    )
 
 
 # ==========================================================
@@ -945,6 +1130,7 @@ st.sidebar.caption("AI-assisted cybersecurity demonstration platform")
 pages = [
     st.Page(dashboard_page, title="Dashboard", icon="🏠", default=True),
     st.Page(threat_analysis_page, title="Threat Analysis", icon="🔍"),
+    st.Page(ioc_scanner_page, title="IOC & Phishing Scanner", icon="🧪"),
     st.Page(threat_intelligence_page, title="Threat Intelligence", icon="🌐"),
     st.Page(expert_system_page, title="Expert System", icon="🧠"),
     st.Page(ai_prediction_page, title="AI Prediction", icon="📈"),
