@@ -1,0 +1,6 @@
+sentence='Artificial Intelligence'
+vowels='aeiou'
+found=[c for c in sentence.lower() if c in vowels]
+print('Sentence:',sentence)
+print('Vowels:',found)
+print('Vowel count:',len(found))
