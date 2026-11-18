@@ -1,0 +1,15 @@
+edges=[('a','b'),('a','c'),('b','d'),('c','d')]
+h={'a':3,'b':2,'c':1,'d':0}
+q=[('a',['a'])]
+seen=set()
+while q:
+ q.sort(key=lambda item:h[item[0]])
+ n,p=q.pop(0)
+ if n in seen: continue
+ seen.add(n)
+ if n=='d':
+  print('Route:',' -> '.join(p))
+  break
+ for src,dst in edges:
+  if src==n: q.append((dst,p+[dst]))
+print('Python demonstration of Prolog-style facts.')
