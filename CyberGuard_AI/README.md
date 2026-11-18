@@ -40,9 +40,7 @@ pip install -r requirements.txt
 
 ### Run Application
 
-```bash
 🔗 **Live Application:** [Launch CyberGuard AI on Streamlit](https://cyber-threat-analyzer.streamlit.app/)
-```
 
 ### Deployment
 Upload the project to GitHub and deploy it
